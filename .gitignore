@@ -1,3 +1,31 @@
+# make scan / make sbom output (grype JSON, SPDX SBOMs)
 reports/
+
+# Python bytecode (tests/smoke.py, if run on the host)
 __pycache__/
-*.pyc
+*.py[cod]
+
+# Disk images. `make run` mounts the repo at /work, so images made with
+# truncate/mkfs.hfsplus or dd there (as in the README examples) land here.
+*.img
+*.dmg
+*.sparseimage
+*.sparsebundle/
+*.iso
+*.raw
+
+# macOS: Finder metadata, AppleDouble resource forks, and the folders macOS
+# creates on volumes it mounts (e.g. an HFS+ image opened from the repo)
+.DS_Store
+._*
+.Spotlight-V100/
+.Trashes/
+.fseventsd/
+.TemporaryItems/
+.DocumentRevisions-V100/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
