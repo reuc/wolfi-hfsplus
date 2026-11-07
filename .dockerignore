@@ -1,0 +1,2 @@
+# Keep the build context empty: the Dockerfile COPYs nothing from it.
+*

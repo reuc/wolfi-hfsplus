@@ -1,0 +1,13 @@
+# Dependabot version updates. Security fixes for Wolfi packages come from the
+# daily no-cache rebuilds (build-and-scan), not from here: the Dockerfiles
+# track cgr.dev/chainguard/wolfi-base:latest on purpose.
+version: 2
+updates:
+  # Actions used by .github/workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]

@@ -1,0 +1,139 @@
+name: build-and-scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Daily rebuild so new CVEs (and new Wolfi fixes) are caught without a code change.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-scan:
+    name: build-scan (${{ matrix.arch }})
+    # Each architecture builds natively; no QEMU emulation.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      TAG: ci-${{ github.run_id }}
+      PLATFORM: linux/${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install grype
+        id: grype
+        uses: anchore/scan-action/download-grype@v7
+
+      - name: Load hfsplus kernel module (best effort)
+        # The privileged smoke test mounts an HFS+ loop device when the host
+        # kernel has the hfsplus driver, and skips that check otherwise.
+        run: |
+          if sudo modprobe hfsplus 2>/dev/null; then echo "hfsplus loaded"; exit 0; fi
+          if timeout 300 sudo apt-get update -qq &&
+             timeout 300 sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" &&
+             sudo modprobe hfsplus; then
+            echo "hfsplus loaded"
+          else
+            echo "::notice title=hfsplus::hfsplus kernel module unavailable on $(uname -r); the HFS+ mount check will be skipped"
+          fi
+
+      - name: Build
+        # NO_CACHE so every run resolves the latest Wolfi packages.
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: .github/scripts/run-annotated.sh "Build ${ARCH}" make build NO_CACHE=1
+
+      - name: Verify image architecture
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          ref=$(make -s image-ref)
+          got=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$ref")
+          echo "$ref is $got"
+          [ "$got" = "linux/${ARCH}" ]
+
+      - name: Smoke test (locked down)
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: .github/scripts/run-annotated.sh "Smoke test locked/${ARCH}" make test-locked
+
+      - name: Smoke test (privileged)
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: .github/scripts/run-annotated.sh "Smoke test privileged/${ARCH}" make test-privileged
+
+      - name: CVE gate
+        env:
+          GRYPE: ${{ steps.grype.outputs.cmd }}
+        run: make scan GRYPE="$GRYPE"
+
+      - name: Job summary
+        if: always()
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          f="reports/image-grype.json"
+          [ -f "$f" ] || { echo "No grype report for ${ARCH}." >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "### CVE scan (${ARCH})"
+            echo
+            echo "| Severity | Unique CVEs |"
+            echo "|---|---|"
+            for s in Critical High Medium Low Negligible Unknown; do
+              n=$(jq --arg s "$s" '[.matches[] | select(.vulnerability.severity == $s) | .vulnerability.id] | unique | length' "$f")
+              echo "| $s | $n |"
+            done
+            echo
+            echo "<details><summary>Findings</summary>"
+            echo
+            echo "| Severity | ID | Package | Installed | Fixed in |"
+            echo "|---|---|---|---|---|"
+            jq -r '.matches[] | "| \(.vulnerability.severity) | \(.vulnerability.id) | \(.artifact.name) | \(.artifact.version) | \(.vulnerability.fix.versions | join(", ")) |"' "$f" | sort -u
+            echo
+            echo "</details>"
+            echo
+            echo "hfsprogs is compiled from source and is not in the apk database, so grype does not report on it."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload grype report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: grype-${{ matrix.arch }}
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # Single status check for branch protection: passes only if every
+  # architecture built, passed both smoke tests and the CVE gate.
+  all-builds:
+    name: build-and-scan (all)
+    if: always()
+    needs: [build-scan]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check results
+        env:
+          BUILD: ${{ needs.build-scan.result }}
+        run: |
+          echo "build-scan: $BUILD"
+          [ "$BUILD" = success ]
