@@ -1,0 +1,98 @@
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+# Builds the image the same way CI does (`make build`) and scans it with
+# Snyk Container:
+#   - `snyk container test` on every run; results go to GitHub Code Scanning.
+#   - `snyk container monitor` on pushes to main and the schedule, so Snyk
+#     keeps a snapshot of the published image and alerts on new CVEs.
+#     (Not on PRs, so PR branches don't overwrite the monitored snapshot.)
+#
+# Like grype, Snyk only sees apk packages: hfsprogs is built from source and
+# is tracked by hfsprogs-update.yml instead.
+#
+# Requires a SNYK_TOKEN repository secret (https://github.com/snyk/actions#getting-your-snyk-token).
+# Without it (PRs from forks, Dependabot PRs) the scan is skipped instead of failing.
+#
+# For more examples, see https://github.com/snyk/actions/
+
+name: Snyk Container
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    # The branches below must be a subset of the branches above
+    branches: [ "main" ]
+  schedule:
+    - cron: '41 2 15,30 * *'
+
+permissions:
+  contents: read
+
+jobs:
+  snyk:
+    name: snyk
+    permissions:
+      contents: read # for actions/checkout to fetch code
+      security-events: write # for github/codeql-action/upload-sarif to upload SARIF results
+      actions: read # only required for a private repository by github/codeql-action/upload-sarif to get the Action run status
+    runs-on: ubuntu-latest
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      TAG: snyk
+    steps:
+    - name: Skip if SNYK_TOKEN is not set
+      if: env.SNYK_TOKEN == ''
+      run: echo "::notice title=Snyk Container skipped::SNYK_TOKEN secret is not set; add it under Settings > Secrets and variables > Actions to enable this scan."
+
+    - uses: actions/checkout@v7
+      if: env.SNYK_TOKEN != ''
+      with:
+        persist-credentials: false
+
+    - name: Build the image
+      id: build
+      if: env.SNYK_TOKEN != ''
+      run: |
+        make build
+        echo "image=$(make -s image-ref)" >> "$GITHUB_OUTPUT"
+
+    - name: Snyk Container test
+      if: env.SNYK_TOKEN != ''
+      # Report findings to Code Scanning rather than failing the build;
+      # the grype CVE gate in build-and-scan is the blocking check.
+      continue-on-error: true
+      uses: snyk/actions/docker@14818c4695ecc4045f33c9cee9e795a788711ca4
+      with:
+        image: ${{ steps.build.outputs.image }}
+        args: --file=Dockerfile
+
+    - name: Snyk Container monitor
+      if: env.SNYK_TOKEN != '' && github.event_name != 'pull_request'
+      uses: snyk/actions/docker@14818c4695ecc4045f33c9cee9e795a788711ca4
+      with:
+        image: ${{ steps.build.outputs.image }}
+        command: monitor
+        sarif: false
+        args: --file=Dockerfile --project-name=wolfi-hfsplus
+
+    - name: Drop non-numeric security-severity values from the SARIF
+      # Snyk writes "security-severity": "null" for issues with no CVSS score,
+      # and Code Scanning rejects the whole file ("is not a number: null").
+      if: env.SNYK_TOKEN != '' && hashFiles('snyk.sarif') != ''
+      run: |
+        jq '.runs[].tool.driver.rules |= ((. // []) | map(
+              if ((.properties["security-severity"] // "") | tostring | test("^[0-9]+(\\.[0-9]+)?$"))
+              then . else del(.properties["security-severity"]) end))' snyk.sarif > snyk.fixed.sarif
+        mv snyk.fixed.sarif snyk.sarif
+
+    - name: Upload result to GitHub Code Scanning
+      # Snyk writes no SARIF if it errored before scanning; don't fail on top of that.
+      if: env.SNYK_TOKEN != '' && hashFiles('snyk.sarif') != ''
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: snyk.sarif
+        category: snyk-container

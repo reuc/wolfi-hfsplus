@@ -234,7 +234,7 @@ Running as root with `--privileged` is the point of this image, so it is not har
 
 Grype uses the Wolfi security database, so it already ignores CVEs that Wolfi has marked as fixed or not affecting the package.
 
-**Blind spot:** hfsprogs is compiled from source, so it isn't in the apk database and grype doesn't scan it. Its runtime library (`libcrypto`) is an apk package and is scanned. To check hfsprogs itself, follow the [Ubuntu CVE tracker for hfsprogs](https://ubuntu.com/security/cves?package=hfsprogs) and update the pinned version when Ubuntu ships a fix.
+**Blind spot:** hfsprogs is compiled from source, so it isn't in the apk database and grype doesn't scan it. Its runtime library (`libcrypto`) is an apk package and is scanned. hfsprogs itself is covered by the weekly [hfsprogs update check](#keeping-hfsprogs-current), which opens an issue when Ubuntu ships a new version. The [Ubuntu CVE tracker for hfsprogs](https://ubuntu.com/security/cves?package=hfsprogs) has the details.
 
 ### When the gate fails
 
@@ -269,16 +269,90 @@ Grype uses the Wolfi security database, so it already ignores CVEs that Wolfi ha
 
 ## Continuous integration
 
-`.github/workflows/build-and-scan.yml` builds, smoke-tests and CVE-gates the image on **both architectures**: `amd64` on `ubuntu-24.04` and `arm64` on `ubuntu-24.04-arm`. Each job builds natively, with no QEMU emulation. Each job:
+| Workflow | What it does | When |
+|---|---|---|
+| `build-and-scan.yml` | Builds, smoke-tests (locked and privileged) and CVE-gates the image on amd64 and arm64 | PRs, pushes to `main`, daily 06:17 UTC, on demand |
+| `publish.yml` | Same gates, then pushes a signed multi-arch image to Docker Hub. See [Publishing to Docker Hub](#publishing-to-docker-hub). | pushes to `main` that change the image, daily 07:41 UTC, on demand; dry run on PRs that change it |
+| `hfsprogs-update.yml` | Checks the pinned hfsprogs against Ubuntu and opens an issue when there's a newer version or the pin is no longer available. See [Keeping hfsprogs current](#keeping-hfsprogs-current). | weekly (Monday 05:23 UTC), on demand; PRs that change the Dockerfile |
+| `snyk-container.yml` | Snyk Container test (to Code Scanning) and monitor | PRs, pushes to `main`, twice a month |
+| `snyk-security.yml` | Snyk Code (SAST) on the repository | PRs, pushes to `main` |
+| `codeql.yml` | CodeQL for the workflows and the Python smoke test | PRs, pushes to `main`, weekly |
+| `dependabot.yml` | Weekly updates for the GitHub Actions used above | weekly |
 
-1. tries to load the runner's `hfsplus` kernel module (installing `linux-modules-extra` if needed), so the privileged mount check can run. If it can't, it posts a notice and the check is skipped.
+### build-and-scan
+
+`build-and-scan.yml` builds, smoke-tests and CVE-gates the image on **both architectures**: `amd64` on `ubuntu-24.04` and `arm64` on `ubuntu-24.04-arm`. Each job builds natively, with no QEMU emulation. Each job:
+
+1. tries to load the runner's `hfsplus` kernel module (`.github/scripts/load-hfsplus.sh`, which installs `linux-modules-extra` if needed), so the privileged mount check can run. If it can't, it posts a notice and the check is skipped.
 2. runs `make build NO_CACHE=1` and checks that the image architecture matches the job
 3. runs `make test-locked`, then `make test-privileged`
 4. runs `make scan`
 
-The workflow runs on every pull request, on every push to `main`, daily at 06:17 UTC, and on demand (**Actions → build-and-scan → Run workflow**). Each job writes a table of CVE counts and findings to the run summary and uploads `reports/` as an artifact named `grype-<arch>`, kept for 30 days. The workflow only builds and scans; it doesn't publish images.
+Each job writes a table of CVE counts and findings to the run summary and uploads `reports/` as an artifact named `grype-<arch>`, kept for 30 days. This workflow only builds and scans; publishing is done by `publish.yml`.
 
 To make the gate block merges, add **`build-and-scan (all)`** as a required status check in the branch protection rule for `main`. It passes only when both architecture jobs pass.
+
+### Repository secrets
+
+Set these under **Settings → Secrets and variables → Actions**:
+
+| Name | Used by | Without it |
+|---|---|---|
+| `DOCKER_USER` | `publish.yml` | publish fails at its first step. It can be a *variable* (shown in run summaries) or a *secret* (masked). |
+| `DOCKER_TOKEN` | `publish.yml` | publish fails at its first step |
+| `SNYK_TOKEN` | `snyk-container.yml`, `snyk-security.yml` | the Snyk scans are skipped with a notice |
+
+The other workflows need no secrets.
+
+## Publishing to Docker Hub
+
+`.github/workflows/publish.yml` publishes **`docker.io/<DOCKER_USER>/wolfi-hfsplus`** for `linux/amd64` and `linux/arm64`, from `main`.
+
+**When it runs:**
+- on every push to `main` that touches the `Dockerfile`, the smoke test, the `Makefile`, `.dockerignore`, `.github/scripts/` or the workflow
+- daily at 07:41 UTC, so new Wolfi security fixes are published without a code change
+- on demand (**Actions → publish → Run workflow**)
+- on pull requests into `main` that change the workflow, as a **dry run**: the gates run, but nothing is logged in or pushed
+
+**Gates:** the image is built natively on each architecture, then must pass the architecture check, **both** smoke tests (locked and privileged) and the grype CVE gate. Only the **exact image that passed** is pushed. If either architecture fails, nothing is published.
+
+**What gets pushed:**
+
+| Item | Tags | Signed / attested |
+|---|---|---|
+| per-architecture image | `:sha-<commit>-amd64`, `:sha-<commit>-arm64` | SBOM attestation (SPDX) + cosign signature |
+| multi-arch index | `:latest`, `:YYYYMMDD`, `:sha-<commit>` | SLSA build provenance + cosign signature |
+
+The daily run moves `latest` and `sha-<commit>` to the new build. **Pin by digest**, for example `docker.io/<DOCKER_USER>/wolfi-hfsplus:20261107@sha256:<digest>`. The digests are shown in each run's summary. The images carry `org.opencontainers.image.source` and `.revision` labels that point back to this repository and commit.
+
+**Setup:** set `DOCKER_USER` and `DOCKER_TOKEN` (see [Repository secrets](#repository-secrets)). Use a Docker Hub **personal access token** with *Read & Write* scope, not your account password. Docker Hub creates the `wolfi-hfsplus` repository on the first push, so check its visibility (public or private) afterwards.
+
+**Verify an image before using it:**
+
+```bash
+IMAGE=docker.io/<DOCKER_USER>/wolfi-hfsplus@sha256:<digest>
+cosign verify "$IMAGE" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/reuc/wolfi-hfsplus/\.github/workflows/publish\.yml@'
+gh attestation verify "oci://$IMAGE" -R reuc/wolfi-hfsplus
+```
+
+The SBOM attestation covers the apk packages. Like grype, it can't see hfsprogs, which is built from source; its exact version is in `/usr/share/doc/hfsprogs/VERSION` in the image.
+
+## Keeping hfsprogs current
+
+grype, Snyk and the SBOM can't see hfsprogs, so `.github/workflows/hfsprogs-update.yml` watches Ubuntu instead. Every Monday, `.github/scripts/check-hfsprogs.sh`:
+
+1. reads `HFSPROGS_VERSION` and `HFSPROGS_REVISION` from the `Dockerfile`
+2. asks the Launchpad API which Ubuntu series publish that exact version (today: `resolute`, 26.04 LTS), and what the newest hfsprogs in those series is (including the `-security` and `-updates` pockets)
+3. checks that the pinned source files can still be downloaded
+
+It opens an issue (only one per finding) when:
+
+- **a newer version is published in the pinned series**, usually a security or bug fix. Follow [Updating hfsprogs](#updating-hfsprogs).
+- **the pin is unavailable**: no series publishes it any more, or its files are gone. Builds will start failing, so move the pin.
+
+No-change rebuilds in other series (for example `6build2` in the development release) don't open an issue. They're listed in the run summary for reference. On pull requests that change the `Dockerfile`, the check fails if the pin can't be downloaded. You can run the script locally on any machine with `curl`, `jq` and `dpkg`.
 
 ## Files
 
@@ -286,9 +360,16 @@ To make the gate block merges, add **`build-and-scan (all)`** as a required stat
 .
 ├── .github/
 │   ├── dependabot.yml           # weekly GitHub Actions updates
-│   ├── scripts/run-annotated.sh # turns failures into workflow annotations
+│   ├── scripts/
+│   │   ├── run-annotated.sh     # turns failures into workflow annotations
+│   │   ├── load-hfsplus.sh      # best-effort hfsplus module load on runners
+│   │   └── check-hfsprogs.sh    # compare the hfsprogs pin with Ubuntu
 │   └── workflows/
 │       ├── build-and-scan.yml   # CI: build, smoke tests, CVE gate
+│       ├── publish.yml          # gated, signed publish to Docker Hub
+│       ├── hfsprogs-update.yml  # weekly hfsprogs update check -> issue
+│       ├── snyk-container.yml   # Snyk Container test + monitor
+│       ├── snyk-security.yml    # Snyk Code (SAST)
 │       └── codeql.yml           # CodeQL (actions, python)
 ├── Dockerfile             # hfsprogs build + root/busybox rootfs
 ├── Makefile               # build / test / run / scan / sbom

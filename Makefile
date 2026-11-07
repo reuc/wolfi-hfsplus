@@ -24,6 +24,9 @@ EXTRA_PACKAGES ?=
 # Defaults to today so packages are re-resolved at least once a day.
 APK_CACHE_BUST ?= $(shell date -u +%Y%m%d)
 NO_CACHE       ?=
+# OCI labels linking a published image back to this repository and commit.
+SOURCE_URL     ?= https://github.com/reuc/wolfi-hfsplus
+VCS_REF        ?= $(shell git rev-parse HEAD 2>/dev/null)
 
 IMAGE_REF := $(IMAGE):$(TAG)
 
@@ -48,7 +51,10 @@ BUILD_ARGS = \
 	--build-arg APK_CACHE_BUST=$(APK_CACHE_BUST) \
 	--label org.opencontainers.image.created=$(shell date -u +%Y-%m-%dT%H:%M:%SZ) \
 	--label org.opencontainers.image.base.name=$(BASE_IMAGE) \
-	--label org.opencontainers.image.title=$(IMAGE)
+	--label org.opencontainers.image.title=$(IMAGE) \
+	--label "org.opencontainers.image.description=Wolfi toolchain image (Python, Go, Rust, C) with HFS/HFS+ utilities (hfsprogs); runs as root, for docker run --privileged" \
+	--label org.opencontainers.image.source=$(SOURCE_URL) \
+	$(if $(VCS_REF),--label org.opencontainers.image.revision=$(VCS_REF))
 
 # Shared by both smoke tests: read-only rootfs, writable tmpfs for /tmp and
 # root's home, no network.

@@ -1,0 +1,74 @@
+# Weekly check of the hfsprogs source pinned in the Dockerfile against what
+# Ubuntu publishes. hfsprogs is compiled from source, so grype and Snyk can't
+# see it; this is how Ubuntu updates (including security fixes) get noticed.
+#
+# Opens an issue (once; it won't duplicate an open one) when Ubuntu publishes
+# a newer version in the pinned series, or when the pinned version is no
+# longer published / its source files can't be downloaded.
+name: hfsprogs-update
+
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".github/scripts/check-hfsprogs.sh"
+      - ".github/workflows/hfsprogs-update.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # open the update issue
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Compare pinned hfsprogs with Ubuntu
+        id: check
+        env:
+          REPORT: hfsprogs-report.md
+        run: |
+          .github/scripts/check-hfsprogs.sh Dockerfile
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail the PR check if the pin is unavailable
+        # On PRs, report instead of opening issues; a pin that can't be
+        # downloaded would break the build, so make that visible.
+        if: github.event_name == 'pull_request' && steps.check.outputs.status == 'unavailable'
+        run: |
+          echo "::error title=hfsprogs::The pinned hfsprogs source is not available; see the job summary."
+          exit 1
+
+      - name: Open an issue
+        if: github.event_name != 'pull_request' && steps.check.outputs.status != 'current'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          STATUS: ${{ steps.check.outputs.status }}
+          PINNED: ${{ steps.check.outputs.pinned }}
+          LATEST: ${{ steps.check.outputs.latest }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$STATUS" = update ]; then
+            title="hfsprogs ${LATEST} is available (pinned: ${PINNED})"
+          else
+            title="hfsprogs ${PINNED} source is no longer available"
+          fi
+          existing=$(gh issue list --state open --limit 200 --json number,title |
+            jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -1)
+          if [ -n "$existing" ]; then
+            echo "Issue #${existing} is already open: ${title}"
+            exit 0
+          fi
+          { cat hfsprogs-report.md; echo; echo "Found by ${RUN_URL}"; } > body.md
+          gh issue create --title "$title" --body-file body.md

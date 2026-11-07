@@ -46,15 +46,7 @@ jobs:
       - name: Load hfsplus kernel module (best effort)
         # The privileged smoke test mounts an HFS+ loop device when the host
         # kernel has the hfsplus driver, and skips that check otherwise.
-        run: |
-          if sudo modprobe hfsplus 2>/dev/null; then echo "hfsplus loaded"; exit 0; fi
-          if timeout 300 sudo apt-get update -qq &&
-             timeout 300 sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" &&
-             sudo modprobe hfsplus; then
-            echo "hfsplus loaded"
-          else
-            echo "::notice title=hfsplus::hfsplus kernel module unavailable on $(uname -r); the HFS+ mount check will be skipped"
-          fi
+        run: .github/scripts/load-hfsplus.sh
 
       - name: Build
         # NO_CACHE so every run resolves the latest Wolfi packages.
