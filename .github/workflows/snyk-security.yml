@@ -51,7 +51,7 @@ jobs:
 
       - name: Set up Snyk CLI
         if: env.SNYK_TOKEN != ''
-        uses: snyk/actions/setup@806182742461562b67788a64410098c9d9b96adb
+        uses: snyk/actions/setup@11b673cfb4b0dc0d860a1323caa199d54950dcce
 
         # Snyk Code (SAST). Findings go to Code Scanning instead of failing the build.
       - name: Snyk Code test

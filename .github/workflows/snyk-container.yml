@@ -65,14 +65,14 @@ jobs:
       # Report findings to Code Scanning rather than failing the build;
       # the grype CVE gate in build-and-scan is the blocking check.
       continue-on-error: true
-      uses: snyk/actions/docker@14818c4695ecc4045f33c9cee9e795a788711ca4
+      uses: snyk/actions/docker@11b673cfb4b0dc0d860a1323caa199d54950dcce
       with:
         image: ${{ steps.build.outputs.image }}
         args: --file=Dockerfile
 
     - name: Snyk Container monitor
       if: env.SNYK_TOKEN != '' && github.event_name != 'pull_request'
-      uses: snyk/actions/docker@14818c4695ecc4045f33c9cee9e795a788711ca4
+      uses: snyk/actions/docker@11b673cfb4b0dc0d860a1323caa199d54950dcce
       with:
         image: ${{ steps.build.outputs.image }}
         command: monitor
